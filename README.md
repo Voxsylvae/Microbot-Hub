@@ -116,6 +116,55 @@ public class YourPlugin extends Plugin {
 
 The build produces plugin jars in the usual Gradle output folders. If the project applies a shading step, the final jars will be placed in the shadow or libs folder depending on the build script.
 
+## Compile and Run Tasks
+
+The project includes automated Gradle tasks for compiling and running the entire project:
+
+### Quick Start
+
+```bash
+# Basic compile and run
+./gradlew compileAndRun
+
+# Force full recompile (cleans build first)
+./gradlew clean compileAndRun
+
+# Quick run without rebuilding
+./gradlew quickRun
+
+# Alternative with recompile flag (if local client needs recompiling)
+./gradlew compileAndRun -Precompile=true
+```
+
+### Configuration
+
+Create a `local.properties` file to control build behavior:
+
+```properties
+# Set to true to use remote RuneLite client, false for local Microbot client
+useLocalClient=true
+
+# Path to local client (optional, defaults to ../microbot-dev)
+microbotLocalPath=../microbot-dev
+
+# Enable debug mode
+debugMode=true
+```
+
+### Client Selection
+
+- **Remote Client** (`useLocalClient=true`): Uses `net.runelite:client:+` from RuneLite repository
+- **Local Client** (`useLocalClient=false`): Uses `com.microbot:client:+` from local Maven repository
+
+When using local client with recompile flag, the task automatically compiles the local client using Maven before building plugins.
+
+### Requirements
+
+- Java 17 (for plugin hub compilation - automatically validated by build tasks)
+- Java 11 (for local main client compilation via Maven)
+- Maven (for local client compilation when using `useLocalClient=false`)
+- Gradle (wrapper included)
+
 ## Running a plugin in RuneLiteDebug for test purpose
 
 Use this minimal driver to start a focused debug session. Replace `PestControlPlugin` with your plugin class if needed.
@@ -146,7 +195,7 @@ public class Microbot
 
 Tips for a smooth session
 
-1. Make sure the Java version you use here matches the version used to build the client (Java 11)
+1. Make sure the Java version you use here matches the version used to build the client (Java 17 for plugin hub, Java 11 for main client)
 2. Confirm that your plugin class is on the classpath of the debug runner
 3. If you see a class version error, rebuild the plugin with the same Java release as the client
 

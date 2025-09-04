@@ -38,6 +38,11 @@ bin/
 ### VS Code ###
 .vscode/
 
+### Local Development ###
+local.properties
+gradle-local.properties
+gradle-remote.properties
+
 ### Mac OS ###
 .DS_Store
 

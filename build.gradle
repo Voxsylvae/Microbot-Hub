@@ -14,11 +14,22 @@ import groovy.json.JsonOutput
 apply from: 'gradle/project-config.gradle'
 apply from: 'gradle/plugin-utils.gradle'
 
+// Load local configuration if it exists (but allow command line to override)
+def localProps = new Properties()
+if (file('local.properties').exists()) {
+    localProps.load(file('local.properties').newDataInputStream())
+    localProps.each { key, value ->
+        // Only set if not already set via command line
+        if (!project.hasProperty(key)) {
+            project.ext.set(key, value)
+        }
+    }
+}
+
 // Java toolchain configuration
 java {
     toolchain {
         languageVersion = JavaLanguageVersion.of(project.ext.TARGET_JDK_VERSION)
-        vendor = JvmVendorSpec."${project.ext.JDK_VENDOR}"
     }
 }
 
@@ -75,7 +86,17 @@ configurations {
     }
 }
 
+// Configure dependency caching for local development
+configurations.all {
+    if (project.hasProperty('useLocalClient') && project.ext.useLocalClient.toString().toBoolean()) {
+        // Force refresh of changing modules for local development
+        resolutionStrategy.cacheChangingModulesFor 0, 'seconds'
+        resolutionStrategy.cacheDynamicVersionsFor 0, 'seconds'
+    }
+}
+
 repositories {
+    mavenLocal()
     maven {
         url = project.ext.getNexusNightlyUrl()
     }
@@ -83,15 +104,67 @@ repositories {
 }
 
 dependencies {
-    compileOnly 'com.microbot:client:+'
-    microbotRuntime 'com.microbot:client:+'
-
-    testImplementation 'com.microbot:client:+'
+    // Dynamic dependency resolution based on local configuration
+    if (project.hasProperty('useLocalClient') && project.ext.useLocalClient.toString().toBoolean()) {
+        // Local development - use locally built client with dynamic versions
+        compileOnly 'net.runelite:client:+'
+        microbotRuntime 'net.runelite:client:+'
+        testImplementation 'net.runelite:client:+'
+        logger.lifecycle("🌐 Using REMOTE RuneLite client")
+    } else {
+        compileOnly 'com.microbot:client:+'
+        microbotRuntime 'com.microbot:client:+'
+        testImplementation 'com.microbot:client:+'
+        logger.lifecycle("🔧 Using LOCAL Microbot client")
+        // Remote/CI - use stable RuneLite client        
+    }
+    
+    // Standard test dependencies following RuneLite practices
+    testImplementation 'org.junit.jupiter:junit-jupiter-api:5.9.2'
+    testImplementation 'org.junit.jupiter:junit-jupiter-params:5.9.2'
+    testRuntimeOnly 'org.junit.jupiter:junit-jupiter-engine:5.9.2'
+    testImplementation 'org.mockito:mockito-core:4.11.0'
+    testImplementation 'org.mockito:mockito-inline:4.11.0'
 }
 
 application {
     // Replace this with the actual main class inside your shaded jar
     mainClass = 'net.runelite.client.RuneLite'
+}
+
+sourceSets.main.java.srcDirs = []
+sourceSets.main.resources.srcDirs = []
+
+// Configure standard test task following RuneLite practices
+tasks.named('test') {
+    useJUnitPlatform()
+    
+    // Configure test execution
+    if (project.hasProperty('testParallelExecution') && project.ext.testParallelExecution.toString().toBoolean()) {
+        maxParallelForks = Runtime.runtime.availableProcessors()
+    }
+    
+    testLogging {
+        events "passed", "skipped", "failed"
+        exceptionFormat "full"
+    }
+}
+
+tasks.named('compileJava') {
+    enabled = false
+}
+tasks.named('processResources') {
+    enabled = false
+}
+tasks.named('classes') {
+    enabled = false
+}
+tasks.named('jar') {
+    enabled = false
+}
+
+tasks.named('shadowJar') {
+    enabled = false
 }
 
 // Plugin Logic
@@ -279,6 +352,115 @@ tasks.register('validateJdkVersion') {
             )
         } else {
             logger.lifecycle("✅ JDK version validated: ${currentJdkVersion}")
+        }
+    }
+}
+
+tasks.register('compileLocalClient') {
+    group = 'build'
+    description = 'Compiles the local Microbot client using Maven'
+    
+    doLast {
+        def localClientPath = project.findProperty('microbotLocalPath') ?: '../microbot-dev'
+        def clientDir = file(localClientPath)
+        
+        if (!clientDir.exists()) {
+            throw new GradleException(
+                "❌ Local client directory not found: ${clientDir.absolutePath}\n" +
+                "Please set 'microbotLocalPath' property or ensure '../microbot-dev' exists"
+            )
+        }
+        
+        logger.lifecycle("🔨 Compiling local Microbot client at: ${clientDir.absolutePath}")
+        
+        def result = exec {
+            workingDir clientDir
+            commandLine 'mvn', 'clean', 'install', '-DskipTests'
+            ignoreExitValue true
+        }
+        
+        if (result.exitValue != 0) {
+            throw new GradleException("❌ Failed to compile local Microbot client")
+        }
+        
+        logger.lifecycle("✅ Local Microbot client compiled successfully")
+    }
+}
+
+tasks.register('compileAndRun') {
+    group = 'application'
+    description = 'Compiles the project and runs the Microbot test class with optional recompile flag'
+    
+    doLast {
+        def shouldRecompile = project.hasProperty('recompile') && project.property('recompile').toString().toBoolean()
+        def useLocal = project.hasProperty('useLocalClient') && project.ext.useLocalClient.toString().toBoolean()
+        
+        logger.lifecycle("🚀 Starting compileAndRun task")
+        logger.lifecycle("   - Recompile mode: ${shouldRecompile}")
+        logger.lifecycle("   - Using local client: ${useLocal}")
+        
+        if (shouldRecompile && useLocal) {
+            logger.lifecycle("🔨 Compiling local client...")
+            project.exec {
+                workingDir '../microbot-dev'
+                commandLine 'mvn', 'clean', 'install', '-DskipTests'
+            }
+        }
+        
+        // Run the test class
+        logger.lifecycle("▶️  Running Microbot test class...")
+        javaexec {
+            classpath = configurations.microbotRuntime + configurations.testRuntimeClasspath + sourceSets.test.output
+            mainClass = 'net.runelite.client.Microbot'
+            workingDir = projectDir
+            
+            // JVM arguments for better performance and debugging
+            jvmArgs = [
+                '-Xmx2g',
+                '-Xms1g',
+                '-Dfile.encoding=UTF-8',
+                '-Djava.awt.headless=false'
+            ]
+            
+            // Pass system properties
+            systemProperties = [
+                'runelite.launcher.nojvm': 'true',
+                'runelite.pluginhub.version': 'dev'
+            ]
+            
+            // Handle additional arguments
+            if (project.hasProperty('appArgs')) {
+                args project.property('appArgs').split(' ')
+            }
+        }
+    }
+}
+
+// Handle recompile mode with clean dependency
+tasks.register('compileAndRunWithClean') {
+    group = 'application'
+    description = 'Internal task that handles recompile mode'
+    dependsOn 'clean', 'compileAndRun'
+}
+
+// Make compileAndRun depend on necessary validation and setup tasks
+tasks.named('compileAndRun') {
+    dependsOn 'validateJdkVersion', 'build', 'testClasses'
+}
+
+tasks.register('quickRun') {
+    group = 'application'
+    description = 'Quickly runs the Microbot test class without recompiling (unless forced)'
+    
+    doLast {
+        def forceRecompile = project.hasProperty('force') && project.property('force').toString().toBoolean()
+        
+        if (forceRecompile) {
+            logger.lifecycle("🔄 Force recompile requested")
+            // Use the clean version when force is requested
+            tasks.compileAndRunWithClean.execute()
+        } else {
+            tasks.compileAndRun.execute()
         }
     }
 }
